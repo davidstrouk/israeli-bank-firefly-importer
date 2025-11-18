@@ -206,12 +206,13 @@ export async function deleteTx(id: string): Promise<AxiosResponse> {
 export async function getAccounts(): Promise<AxiosResponse> {
   logger().debug('Getting accounts from Firefly');
   try {
-    const result = await fireflyAxios.get('/api/v1/accounts');
-    logger().debug(
-      { count: result.data.data.length },
-      'Got accounts from Firefly',
-    );
-    return result;
+    // Use pagination to get all accounts
+    const allAccounts = await paginate('/api/v1/accounts');
+    logger().debug({ count: allAccounts.length }, 'Got accounts from Firefly');
+    // Return in the same format as before
+    return {
+      data: { data: allAccounts },
+    } as AxiosResponse;
   } catch (e: unknown) {
     const error = e as { response?: { status?: number }; message?: string };
     logger().error(

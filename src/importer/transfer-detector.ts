@@ -1,6 +1,6 @@
-import moment from "moment";
-import type { Provider as Config } from "nconf";
-import logger from "../logger.js";
+import moment from 'moment';
+import type { Provider as Config } from 'nconf';
+import logger from '../logger.js';
 
 interface Account {
   id: string;
@@ -61,10 +61,10 @@ interface ExistingTransfer {
  */
 export function convertCreditCardPayments(
   transactions: Transaction[],
-  accountsMap?: AccountsMap
+  accountsMap?: AccountsMap,
 ): ConversionResult {
   if (!accountsMap) {
-    logger().debug("No accountsMap provided for credit card payment detection");
+    logger().debug('No accountsMap provided for credit card payment detection');
     return {
       transfers: [],
       remaining: transactions,
@@ -76,7 +76,7 @@ export function convertCreditCardPayments(
     // Build a map of credit card account numbers (last 4 digits) to account IDs
     const ccAccountMap: Record<string, string> = {};
     Object.entries(accountsMap).forEach(([accountNumber, account]) => {
-      if (account.kind === "credit-card") {
+      if (account.kind === 'credit-card') {
         // Extract last 4 digits or use account number as-is
         const last4 = accountNumber.slice(-4);
         ccAccountMap[last4] = account.id;
@@ -88,7 +88,7 @@ export function convertCreditCardPayments(
       {
         creditCardAccounts: Object.keys(ccAccountMap).length / 2,
       },
-      "Built credit card account map for payment detection"
+      'Built credit card account map for payment detection',
     );
 
     const convertedTransfers: Transaction[] = [];
@@ -98,7 +98,7 @@ export function convertCreditCardPayments(
     // Process each transaction
     transactions.forEach((tx) => {
       // Only process withdrawals
-      if (tx.type !== "withdrawal") {
+      if (tx.type !== 'withdrawal') {
         remainingTxs.push(tx);
         return;
       }
@@ -114,19 +114,18 @@ export function convertCreditCardPayments(
       const internalRefStr = String(internalRef);
 
       // Try to find matching credit card account
-      const ccAccountId =
-        ccAccountMap[internalRefStr] || ccAccountMap[internalRefStr.slice(-4)];
+      const ccAccountId = ccAccountMap[internalRefStr] || ccAccountMap[internalRefStr.slice(-4)];
 
       if (ccAccountId) {
         // Convert to transfer
         const transfer: Transaction = {
           ...tx,
-          type: "transfer",
+          type: 'transfer',
           destination_id: ccAccountId,
-          description: tx.description || "Credit card payment",
+          description: tx.description || 'Credit card payment',
           notes: tx.notes
             ? `${tx.notes}\nCredit Card Payment (auto-detected)`
-            : "Credit Card Payment (auto-detected)",
+            : 'Credit Card Payment (auto-detected)',
         };
 
         convertedTransfers.push(transfer);
@@ -140,7 +139,7 @@ export function convertCreditCardPayments(
             ccAccountId,
             sourceAccountId: tx.source_id,
           },
-          "Converted credit card payment to transfer"
+          'Converted credit card payment to transfer',
         );
       } else {
         remainingTxs.push(tx);
@@ -153,7 +152,7 @@ export function convertCreditCardPayments(
           convertedPayments: convertedTransfers.length,
           total: transactions.length,
         },
-        "Converted credit card payments to transfers"
+        'Converted credit card payments to transfers',
       );
     }
 
@@ -169,7 +168,7 @@ export function convertCreditCardPayments(
         error: err.message,
         stack: err.stack,
       },
-      "Error in credit card payment detection"
+      'Error in credit card payment detection',
     );
 
     return {
@@ -187,7 +186,7 @@ function findMatchingExistingTransfer(
   deposit: Transaction,
   withdrawal: Transaction,
   existingTransfers: ExistingTransfer[],
-  dateTolerance: number
+  dateTolerance: number,
 ): ExistingTransfer | undefined {
   return existingTransfers.find((transfer) => {
     try {
@@ -199,8 +198,8 @@ function findMatchingExistingTransfer(
 
       // Check accounts match
       if (
-        transfer.source_id !== withdrawal.source_id ||
-        transfer.destination_id !== deposit.destination_id
+        transfer.source_id !== withdrawal.source_id
+        || transfer.destination_id !== deposit.destination_id
       ) {
         return false;
       }
@@ -211,16 +210,16 @@ function findMatchingExistingTransfer(
       const withdrawalDate = moment(withdrawal.date);
 
       if (
-        !transferDate.isValid() ||
-        !depositDate.isValid() ||
-        !withdrawalDate.isValid()
+        !transferDate.isValid()
+        || !depositDate.isValid()
+        || !withdrawalDate.isValid()
       ) {
         return false;
       }
 
-      const daysDiffDeposit = Math.abs(transferDate.diff(depositDate, "days"));
+      const daysDiffDeposit = Math.abs(transferDate.diff(depositDate, 'days'));
       const daysDiffWithdrawal = Math.abs(
-        transferDate.diff(withdrawalDate, "days")
+        transferDate.diff(withdrawalDate, 'days'),
       );
 
       return (
@@ -239,7 +238,7 @@ function findMatchingExistingTransfer(
 export function detectAndConvertTransfers(
   transactions: Transaction[],
   dateTolerance: number = 2,
-  existingTransfers: ExistingTransfer[] = []
+  existingTransfers: ExistingTransfer[] = [],
 ): ExtendedConversionResult {
   try {
     logger().debug(
@@ -247,18 +246,17 @@ export function detectAndConvertTransfers(
         count: transactions.length,
         dateTolerance,
       },
-      "Starting transfer detection"
+      'Starting transfer detection',
     );
 
     // Validate and filter transactions with required fields
     const validTxs = transactions.filter((tx) => {
-      const isValid =
-        tx && tx.date && tx.type && tx.amount !== undefined && tx.external_id;
+      const isValid = tx && tx.date && tx.type && tx.amount !== undefined && tx.external_id;
 
-      if (!isValid && logger().level === "debug") {
+      if (!isValid && logger().level === 'debug') {
         logger().debug(
           { tx },
-          "Skipping invalid transaction in transfer detection"
+          'Skipping invalid transaction in transfer detection',
         );
       }
 
@@ -272,7 +270,7 @@ export function detectAndConvertTransfers(
           valid: validTxs.length,
           invalid: transactions.length - validTxs.length,
         },
-        "Some transactions skipped due to missing required fields"
+        'Some transactions skipped due to missing required fields',
       );
     }
 
@@ -289,8 +287,8 @@ export function detectAndConvertTransfers(
     });
 
     // Separate deposits and withdrawals
-    const deposits = sortedTxs.filter((tx) => tx.type === "deposit");
-    const withdrawals = sortedTxs.filter((tx) => tx.type === "withdrawal");
+    const deposits = sortedTxs.filter((tx) => tx.type === 'deposit');
+    const withdrawals = sortedTxs.filter((tx) => tx.type === 'withdrawal');
 
     const convertedTransfers: Transaction[] = [];
     const duplicatesOfExistingTransfers: DuplicatePair[] = [];
@@ -318,7 +316,7 @@ export function detectAndConvertTransfers(
             return false;
           }
 
-          const daysDiff = Math.abs(depositDate.diff(withdrawalDate, "days"));
+          const daysDiff = Math.abs(depositDate.diff(withdrawalDate, 'days'));
           if (daysDiff > dateTolerance) {
             return false;
           }
@@ -342,7 +340,7 @@ export function detectAndConvertTransfers(
               deposit: deposit.external_id,
               withdrawal: withdrawal.external_id,
             },
-            "Error comparing transactions"
+            'Error comparing transactions',
           );
           return false;
         }
@@ -355,7 +353,7 @@ export function detectAndConvertTransfers(
             deposit,
             matchingWithdrawal,
             existingTransfers,
-            dateTolerance
+            dateTolerance,
           );
 
           if (existingTransfer) {
@@ -380,13 +378,13 @@ export function detectAndConvertTransfers(
                 depositDesc: deposit.description,
                 withdrawalDesc: matchingWithdrawal.description,
               },
-              "Found duplicate deposit/withdrawal pair for existing transfer"
+              'Found duplicate deposit/withdrawal pair for existing transfer',
             );
           } else {
             // Create a new transfer transaction
             const transfer = createTransferTransaction(
               deposit,
-              matchingWithdrawal
+              matchingWithdrawal,
             );
             convertedTransfers.push(transfer);
 
@@ -395,7 +393,7 @@ export function detectAndConvertTransfers(
             processedTxIds.add(matchingWithdrawal.external_id);
 
             const daysDiff = Math.abs(
-              moment(deposit.date).diff(moment(matchingWithdrawal.date), "days")
+              moment(deposit.date).diff(moment(matchingWithdrawal.date), 'days'),
             );
             logger().debug(
               {
@@ -408,7 +406,7 @@ export function detectAndConvertTransfers(
                 depositDesc: deposit.description,
                 withdrawalDesc: matchingWithdrawal.description,
               },
-              "Converted deposit/withdrawal pair to transfer"
+              'Converted deposit/withdrawal pair to transfer',
             );
           }
         } catch (err) {
@@ -418,7 +416,7 @@ export function detectAndConvertTransfers(
               deposit: deposit.external_id,
               withdrawal: matchingWithdrawal.external_id,
             },
-            "Error creating transfer transaction"
+            'Error creating transfer transaction',
           );
         }
       }
@@ -439,7 +437,7 @@ export function detectAndConvertTransfers(
         remainingCount: remainingTxs.length,
         dateTolerance,
       },
-      "Transfer detection complete"
+      'Transfer detection complete',
     );
 
     return {
@@ -455,7 +453,7 @@ export function detectAndConvertTransfers(
         error: err.message,
         stack: err.stack,
       },
-      "Fatal error in transfer detection - returning original transactions"
+      'Fatal error in transfer detection - returning original transactions',
     );
 
     // Return original transactions if something goes wrong
@@ -473,14 +471,13 @@ export function detectAndConvertTransfers(
  */
 function createTransferTransaction(
   deposit: Transaction,
-  withdrawal: Transaction
+  withdrawal: Transaction,
 ): Transaction {
   // Combine external IDs to create a unique identifier for the transfer
   const transferExternalId = `transfer_${withdrawal.external_id}_${deposit.external_id}`;
 
   // Use the withdrawal description as primary, or combine both if different
-  const { description: withdrawalDescription, notes: withdrawalNotes } =
-    withdrawal;
+  const { description: withdrawalDescription, notes: withdrawalNotes } = withdrawal;
 
   let description = withdrawalDescription;
   if (deposit.description && deposit.description !== withdrawalDescription) {
@@ -488,13 +485,13 @@ function createTransferTransaction(
   }
 
   // Combine notes if both exist
-  let notes = withdrawalNotes || "";
+  let notes = withdrawalNotes || '';
   if (deposit.notes && deposit.notes !== withdrawalNotes) {
     notes = notes ? `${notes}\n---\n${deposit.notes}` : deposit.notes;
   }
 
   return {
-    type: "transfer",
+    type: 'transfer',
     date: withdrawal.date, // Use withdrawal date as primary
     amount: deposit.amount, // Amount should be the same
     description,
@@ -504,8 +501,8 @@ function createTransferTransaction(
     external_id: transferExternalId,
     currency_code: deposit.currency_code || withdrawal.currency_code,
     category_name: undefined, // Transfers typically don't have categories
-    internal_reference: `${withdrawal.internal_reference || ""}_${
-      deposit.internal_reference || ""
+    internal_reference: `${withdrawal.internal_reference || ''}_${
+      deposit.internal_reference || ''
     }`,
     tags: combineTransferTags(withdrawal, deposit),
   };
@@ -516,7 +513,7 @@ function createTransferTransaction(
  */
 function combineTransferTags(
   withdrawal: Transaction,
-  deposit: Transaction
+  deposit: Transaction,
 ): string[] | undefined {
   const tags = new Set<string>();
 
@@ -538,23 +535,23 @@ function combineTransferTags(
 export function applyTransferDetection(
   transactions: Transaction[],
   config: Config,
-  existingTransfers: ExistingTransfer[] = []
+  existingTransfers: ExistingTransfer[] = [],
 ): Transaction[] {
   // Check if transfer detection is enabled (default: true)
-  const enabled = config?.get("autoDetectTransfers") !== false;
+  const enabled = config?.get('autoDetectTransfers') !== false;
 
   if (!enabled) {
-    logger().debug("Auto-detect transfers is disabled");
+    logger().debug('Auto-detect transfers is disabled');
     return transactions;
   }
 
   // Get date tolerance from config (default: 2 days)
-  const dateTolerance = config?.get("transferDateTolerance") || 2;
+  const dateTolerance = config?.get('transferDateTolerance') || 2;
 
   const result = detectAndConvertTransfers(
     transactions,
     dateTolerance,
-    existingTransfers
+    existingTransfers,
   );
 
   // Log if duplicates were found
@@ -563,7 +560,7 @@ export function applyTransferDetection(
       {
         duplicatePairs: result.duplicatesOfExisting.length,
       },
-      "Found duplicate deposit/withdrawal pairs for existing transfers - they will not be imported"
+      'Found duplicate deposit/withdrawal pairs for existing transfers - they will not be imported',
     );
   }
 

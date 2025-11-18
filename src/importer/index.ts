@@ -626,15 +626,83 @@ async function createAndMapAccounts(
   );
 
   const rawAccounts: AxiosResponse = await getAccounts();
+
+  logger().debug(
+    {
+      totalFireflyAccounts: rawAccounts.data.data.length,
+      scrapperAccountNumbers: Object.keys(map),
+      allFireflyAccountNumbers: rawAccounts.data.data.map(
+        (acc: {
+          id: string;
+          attributes: { account_number: string; name: string; type: string };
+        }) => ({
+          id: acc.id,
+          account_number: acc.attributes.account_number,
+          name: acc.attributes.name,
+          type: acc.attributes.type,
+        }),
+      ),
+    },
+    'Starting account matching',
+  );
+
   const accountsMap = rawAccounts.data.data
-    .filter((x: { attributes: { account_number: string } }) => {
-      const accountNumber = x.attributes.account_number;
-      return accountNumber && map[accountNumber];
-    })
-    .map((x: { id: string; attributes: { account_number: string } }) => ({
-      id: x.id,
-      accountNumber: x.attributes.account_number,
-    }))
+    .map(
+      (x: {
+        id: string;
+        attributes: { account_number: string; name: string; type: string };
+      }) => {
+        // Try to match by account_number first, then by name
+        const accountNumber = x.attributes.account_number;
+        const accountName = x.attributes.name;
+        const accountType = x.attributes.type;
+
+        logger().debug(
+          {
+            fireflyAccountId: x.id,
+            accountNumber,
+            accountName,
+            accountType,
+            inScrapperByNumber: !!map[accountNumber],
+            inScrapperByName: !!map[accountName],
+          },
+          'Checking Firefly account',
+        );
+
+        // Find matching scrapper account
+        let matchedAccountNumber: string | undefined;
+        if (accountNumber && map[accountNumber]) {
+          matchedAccountNumber = accountNumber;
+          logger().debug(
+            { accountNumber, fireflyAccountId: x.id },
+            'Matched by account_number',
+          );
+        } else if (accountName && map[accountName]) {
+          matchedAccountNumber = accountName;
+          logger().debug(
+            { accountName, fireflyAccountId: x.id },
+            'Matched by name',
+          );
+        } else {
+          logger().debug(
+            { accountNumber, accountName, fireflyAccountId: x.id },
+            'No match found for Firefly account',
+          );
+        }
+
+        if (!matchedAccountNumber) return null;
+
+        return {
+          id: x.id,
+          accountNumber: matchedAccountNumber,
+        };
+      },
+    )
+    .filter(
+      (
+        x: { id: string; accountNumber: string } | null,
+      ): x is { id: string; accountNumber: string } => x !== null,
+    )
     .reduce((m: AccountsMap, x: { id: string; accountNumber: string }) => {
       const accountData = map[x.accountNumber];
       if (!accountData) return m;
@@ -646,6 +714,14 @@ async function createAndMapAccounts(
         },
       };
     }, {});
+
+  logger().debug(
+    {
+      matchedAccounts: Object.keys(accountsMap),
+      matchedCount: Object.keys(accountsMap).length,
+    },
+    'Account matching complete',
+  );
   const missedAccounts = [
     ...new Set(
       scrapperAccounts
@@ -654,7 +730,17 @@ async function createAndMapAccounts(
     ),
   ];
 
+  logger().debug(
+    {
+      allScrapperAccounts: scrapperAccounts.map((x) => x.accountNumber),
+      matchedAccounts: Object.keys(accountsMap),
+      missedAccounts,
+    },
+    'Account comparison complete',
+  );
+
   if (missedAccounts.length === 0) {
+    logger().debug('All scrapper accounts found in Firefly');
     return accountsMap;
   }
 
@@ -699,18 +785,45 @@ async function createAndMapAccounts(
           // Re-fetch accounts to find the existing one
           const refreshedAccounts: AxiosResponse = await getAccounts();
 
+          logger().debug(
+            {
+              lookingFor: a,
+              totalAccountsInFirefly: refreshedAccounts.data.data.length,
+            },
+            'Searching for existing account in Firefly',
+          );
+
           // Try to find by account_number first, then by name
           let existingAccount = refreshedAccounts.data.data.find(
             (acc: { attributes: { account_number: string; name: string } }) => acc.attributes.account_number === a,
           );
 
+          if (existingAccount) {
+            logger().debug(
+              { accountNumber: a, fireflyAccountId: existingAccount.id },
+              'Found account by account_number field',
+            );
+          }
+
           // If not found by account_number, try by name
           if (!existingAccount) {
+            logger().debug(
+              { accountNumber: a },
+              'Not found by account_number, trying by name field',
+            );
+
             existingAccount = refreshedAccounts.data.data.find(
               (acc: {
                   attributes: { account_number: string; name: string };
                 }) => acc.attributes.name === a,
             );
+
+            if (existingAccount) {
+              logger().debug(
+                { accountNumber: a, fireflyAccountId: existingAccount.id },
+                'Found account by name field',
+              );
+            }
           }
 
           if (existingAccount) {
@@ -731,11 +844,24 @@ async function createAndMapAccounts(
             ];
           }
 
-          // If still not found, log the issue but don't fail
+          // If still not found, log all accounts for debugging
           logger().error(
             {
               accountNumber: a,
               totalAccounts: refreshedAccounts.data.data.length,
+              sampleAccounts: refreshedAccounts.data.data.slice(0, 5).map(
+                (acc: {
+                    attributes: {
+                      account_number: string;
+                      name: string;
+                      type: string;
+                    };
+                  }) => ({
+                  account_number: acc.attributes.account_number,
+                  name: acc.attributes.name,
+                  type: acc.attributes.type,
+                }),
+              ),
             },
             'Account exists in Firefly but could not be found by account_number or name',
           );

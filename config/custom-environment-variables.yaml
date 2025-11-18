@@ -1,6 +1,8 @@
 firefly:
   baseUrl: 'FIREFLY_BASE_URL'
   tokenApi: 'FIREFLY_TOKEN_API'
+autoDetectTransfers: 'AUTO_DETECT_TRANSFERS'
+transferDateTolerance: 'TRANSFER_DATE_TOLERANCE'
 cron: 'CRON'
 scraper:
   parallel: 'SCRAPER_PARALLEL'

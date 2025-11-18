@@ -2,6 +2,8 @@
   "firefly": {
     "limit": 1000
   },
+  "autoDetectTransfers": true,
+  "transferDateTolerance": 2,
   "identifyMethod": {
     "isracard": "identifier",
     "leumi": "hash",

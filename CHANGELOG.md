@@ -1,3 +1,39 @@
+## [Unreleased]
+
+### Features
+
+* **transfer-detection:** Auto-detect and convert matching deposit/withdrawal pairs to transfers
+  - Automatically identifies deposits and withdrawals from different accounts with the same amount
+  - Supports configurable date tolerance (default: 2 days) to handle processing delays
+  - Converts matching pairs into a single transfer transaction between accounts
+  - **Smart duplicate detection**: Checks for existing transfers to avoid creating duplicates
+  - **Auto-cleanup**: Removes duplicate deposit/withdrawal pairs when matching transfer exists
+  - Configurable via `autoDetectTransfers` and `transferDateTolerance` options (enabled by default)
+  - Helps maintain accurate account balances by properly tracking inter-account transfers
+  - Comprehensive error handling with validation and graceful degradation
+  - Includes test utility to validate transfer detection logic
+  - **Backfill script** to convert existing transactions in Firefly III with dry-run support
+
+* **credit-card-payment-detection:** Auto-detect and convert credit card payment withdrawals to transfers
+  - Automatically identifies bank withdrawals that are credit card payments
+  - Matches by internal reference field to credit card account number (full or last 4 digits)
+  - Converts withdrawal transactions to transfer transactions between bank and credit card accounts
+  - Runs before account-to-account transfer detection to avoid conflicts
+  - Always enabled - no additional configuration required
+  - Integrated into both new imports and backfill script
+  - Adds automatic notes indicating credit card payment auto-detection
+
+* **credit-card-merchant-accounts:** Automatic expense account creation for credit card transactions
+  - Credit card transactions now automatically create destination expense accounts based on merchant names
+  - Uses transaction description as merchant/expense account name
+  - Automatically creates new expense accounts if they don't exist in Firefly III
+  - Reuses existing expense accounts for recurring merchants
+  - In-memory caching to avoid redundant API calls for same merchant
+  - **Automatic backfill**: Updates existing credit card transactions without destination accounts on next import
+  - Smart duplicate detection ensures transactions aren't duplicated during update
+  - Graceful error handling - transactions still imported if account creation fails
+  - Better spending insights and categorization by merchant
+
 ## [1.5.10](https://github.com/itairaz1/israeli-bank-firefly-importer/compare/v1.5.9...v1.5.10) (2025-08-30)
 
 

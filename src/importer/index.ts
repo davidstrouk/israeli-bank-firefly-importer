@@ -667,9 +667,9 @@ async function createAndMapAccounts(
     (m, a) => m.then(async (x: AxiosResponse[]) => {
       const accountData = map[a];
       if (!accountData) return x;
-      return [
-        ...x,
-        await createAccount({
+
+      try {
+        const result = await createAccount({
           name: a,
           account_number: a,
           type: 'asset',
@@ -683,8 +683,71 @@ async function createAndMapAccounts(
               monthly_payment_date: calcMonthlyPaymentDate(accountData),
             }
             : {}),
-        }),
-      ];
+        });
+        return [...x, result];
+      } catch (error: unknown) {
+        const err = error as {
+            response?: { status?: number; data?: unknown };
+          };
+          // If account already exists (422), try to find it
+        if (err?.response?.status === 422) {
+          logger().warn(
+            { accountNumber: a },
+            'Account already exists in Firefly, fetching existing account',
+          );
+
+          // Re-fetch accounts to find the existing one
+          const refreshedAccounts: AxiosResponse = await getAccounts();
+
+          // Try to find by account_number first, then by name
+          let existingAccount = refreshedAccounts.data.data.find(
+            (acc: { attributes: { account_number: string; name: string } }) => acc.attributes.account_number === a,
+          );
+
+          // If not found by account_number, try by name
+          if (!existingAccount) {
+            existingAccount = refreshedAccounts.data.data.find(
+              (acc: {
+                  attributes: { account_number: string; name: string };
+                }) => acc.attributes.name === a,
+            );
+          }
+
+          if (existingAccount) {
+            logger().info(
+              { accountNumber: a, accountId: existingAccount.id },
+              'Found existing account',
+            );
+            // Return a mock AxiosResponse structure
+            return [
+              ...x,
+              {
+                data: { data: existingAccount },
+                status: 200,
+                statusText: 'OK',
+                headers: {},
+                config: {} as never,
+              },
+            ];
+          }
+
+          // If still not found, log the issue but don't fail
+          logger().error(
+            {
+              accountNumber: a,
+              totalAccounts: refreshedAccounts.data.data.length,
+            },
+            'Account exists in Firefly but could not be found by account_number or name',
+          );
+
+          // Since the account exists (422 error), skip it and continue
+          // This prevents the import from failing completely
+          return x;
+        }
+
+        // Re-throw if not a 422 or if we couldn't find the account
+        throw error;
+      }
     }),
     Promise.resolve([] as AxiosResponse[]),
   );

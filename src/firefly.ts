@@ -32,16 +32,19 @@ async function paginate(url: string, query?: string): Promise<unknown[]> {
   const fireFlyData: unknown[] = [];
   const urlSearchParams = new URLSearchParams({
     limit: config.get('firefly:limit'),
-    ...query ? { query } : {},
+    ...(query ? { query } : {}),
   });
   let nextPage: string | null = `${url}?${urlSearchParams}`;
   let pageCount = 0;
 
-  logger().debug({
-    url,
-    query,
-    limit: config.get('firefly:limit'),
-  }, 'Starting pagination');
+  logger().debug(
+    {
+      url,
+      query,
+      limit: config.get('firefly:limit'),
+    },
+    'Starting pagination',
+  );
 
   while (nextPage) {
     let res: AxiosResponse<{ data: unknown[]; links: { next: string | null } }>;
@@ -55,12 +58,15 @@ async function paginate(url: string, query?: string): Promise<unknown[]> {
         logger().debug({ url, query }, 'No results found (404)');
         return [];
       }
-      logger().error({
-        url,
-        query,
-        error: error.message,
-        status: error?.response?.status,
-      }, 'Error during pagination');
+      logger().error(
+        {
+          url,
+          query,
+          error: error.message,
+          status: error?.response?.status,
+        },
+        'Error during pagination',
+      );
       throw e;
     }
 
@@ -68,20 +74,26 @@ async function paginate(url: string, query?: string): Promise<unknown[]> {
     fireFlyData.push(...res.data.data);
     nextPage = res.data.links.next;
 
-    logger().debug({
-      page: pageCount,
-      itemsOnPage: pageDataCount,
-      totalSoFar: fireFlyData.length,
-      hasNextPage: !!nextPage,
-    }, 'Page fetched');
+    logger().debug(
+      {
+        page: pageCount,
+        itemsOnPage: pageDataCount,
+        totalSoFar: fireFlyData.length,
+        hasNextPage: !!nextPage,
+      },
+      'Page fetched',
+    );
   }
 
-  logger().debug({
-    url,
-    query,
-    totalPages: pageCount,
-    totalItems: fireFlyData.length,
-  }, 'Pagination complete');
+  logger().debug(
+    {
+      url,
+      query,
+      totalPages: pageCount,
+      totalItems: fireFlyData.length,
+    },
+    'Pagination complete',
+  );
 
   return fireFlyData;
 }
@@ -89,7 +101,10 @@ async function paginate(url: string, query?: string): Promise<unknown[]> {
 export async function getAllTxs(): Promise<unknown[]> {
   logger().debug('Getting all transactions from Firefly');
   const results = await paginate('/api/v1/transactions');
-  logger().info({ count: results.length }, 'Retrieved all transactions from Firefly');
+  logger().info(
+    { count: results.length },
+    'Retrieved all transactions from Firefly',
+  );
   return results;
 }
 
@@ -109,19 +124,32 @@ interface Transaction {
   [key: string]: unknown;
 }
 
-export async function createTx(transactions: Transaction[] | unknown[]): Promise<AxiosResponse> {
+export async function createTx(
+  transactions: Transaction[] | unknown[],
+): Promise<AxiosResponse> {
   logger().debug({ count: transactions.length }, 'Creating transactions');
   try {
-    const result = await fireflyAxios.post('/api/v1/transactions', { transactions });
-    logger().debug({ count: transactions.length }, 'Transactions created successfully');
+    const result = await fireflyAxios.post('/api/v1/transactions', {
+      transactions,
+    });
+    logger().debug(
+      { count: transactions.length },
+      'Transactions created successfully',
+    );
     return result;
   } catch (e: unknown) {
-    const error = e as { response?: { status?: number; data?: unknown }; message?: string };
-    logger().error({
-      error: error.message,
-      status: error?.response?.status,
-      data: error?.response?.data,
-    }, 'Error creating transactions');
+    const error = e as {
+      response?: { status?: number; data?: unknown };
+      message?: string;
+    };
+    logger().error(
+      {
+        error: error.message,
+        status: error?.response?.status,
+        data: error?.response?.data,
+      },
+      'Error creating transactions',
+    );
     throw e;
   }
 }
@@ -132,17 +160,25 @@ export async function updateTx(
 ): Promise<AxiosResponse> {
   logger().debug({ id, count: transactions.length }, 'Updating transaction');
   try {
-    const result = await fireflyAxios.put(`/api/v1/transactions/${id}`, { transactions });
+    const result = await fireflyAxios.put(`/api/v1/transactions/${id}`, {
+      transactions,
+    });
     logger().debug({ id }, 'Transaction updated successfully');
     return result;
   } catch (e: unknown) {
-    const error = e as { response?: { status?: number; data?: unknown }; message?: string };
-    logger().error({
-      id,
-      error: error.message,
-      status: error?.response?.status,
-      data: error?.response?.data,
-    }, 'Error updating transaction');
+    const error = e as {
+      response?: { status?: number; data?: unknown };
+      message?: string;
+    };
+    logger().error(
+      {
+        id,
+        error: error.message,
+        status: error?.response?.status,
+        data: error?.response?.data,
+      },
+      'Error updating transaction',
+    );
     throw e;
   }
 }
@@ -155,11 +191,14 @@ export async function deleteTx(id: string): Promise<AxiosResponse> {
     return result;
   } catch (e: unknown) {
     const error = e as { response?: { status?: number }; message?: string };
-    logger().error({
-      id,
-      error: error.message,
-      status: error?.response?.status,
-    }, 'Error deleting transaction');
+    logger().error(
+      {
+        id,
+        error: error.message,
+        status: error?.response?.status,
+      },
+      'Error deleting transaction',
+    );
     throw e;
   }
 }
@@ -168,14 +207,20 @@ export async function getAccounts(): Promise<AxiosResponse> {
   logger().debug('Getting accounts from Firefly');
   try {
     const result = await fireflyAxios.get('/api/v1/accounts');
-    logger().debug({ count: result.data.data.length }, 'Got accounts from Firefly');
+    logger().debug(
+      { count: result.data.data.length },
+      'Got accounts from Firefly',
+    );
     return result;
   } catch (e: unknown) {
     const error = e as { response?: { status?: number }; message?: string };
-    logger().error({
-      error: error.message,
-      status: error?.response?.status,
-    }, 'Error getting accounts');
+    logger().error(
+      {
+        error: error.message,
+        status: error?.response?.status,
+      },
+      'Error getting accounts',
+    );
     throw e;
   }
 }
@@ -193,19 +238,28 @@ export async function createAccount(data: AccountData): Promise<AxiosResponse> {
   logger().debug({ accountName: data.name }, 'Creating account in Firefly');
   try {
     const result = await fireflyAxios.post('/api/v1/accounts', data);
-    logger().info({
-      accountName: data.name,
-      accountId: result.data.data.id,
-    }, 'Account created successfully');
+    logger().info(
+      {
+        accountName: data.name,
+        accountId: result.data.data.id,
+      },
+      'Account created successfully',
+    );
     return result;
   } catch (e: unknown) {
-    const error = e as { response?: { status?: number; data?: unknown }; message?: string };
-    logger().error({
-      accountName: data.name,
-      error: error.message,
-      status: error?.response?.status,
-      data: error?.response?.data,
-    }, 'Error creating account');
+    const error = e as {
+      response?: { status?: number; data?: unknown };
+      message?: string;
+    };
+    logger().error(
+      {
+        accountName: data.name,
+        error: error.message,
+        status: error?.response?.status,
+        data: error?.response?.data,
+      },
+      'Error creating account',
+    );
     throw e;
   }
 }
@@ -221,7 +275,10 @@ export async function getOrCreateExpenseAccount(
   if (expenseAccountCache.has(merchantName)) {
     const cachedId = expenseAccountCache.get(merchantName);
     if (cachedId) {
-      logger().debug({ merchantName, accountId: cachedId }, 'Using cached expense account');
+      logger().debug(
+        { merchantName, accountId: cachedId },
+        'Using cached expense account',
+      );
       return cachedId;
     }
   }
@@ -240,7 +297,10 @@ export async function getOrCreateExpenseAccount(
 
     if (existingAccount) {
       const accountId = existingAccount.id;
-      logger().debug({ merchantName, accountId }, 'Found existing expense account');
+      logger().debug(
+        { merchantName, accountId },
+        'Found existing expense account',
+      );
       expenseAccountCache.set(merchantName, accountId);
       return accountId;
     }
@@ -263,21 +323,30 @@ export async function getOrCreateExpenseAccount(
     });
 
     const accountId = createResponse.data.data.id;
-    logger().info({
-      merchantName,
-      accountId,
-    }, 'Created new expense account');
+    logger().info(
+      {
+        merchantName,
+        accountId,
+      },
+      'Created new expense account',
+    );
 
     expenseAccountCache.set(merchantName, accountId);
     return accountId;
   } catch (e: unknown) {
-    const error = e as { response?: { status?: number; data?: unknown }; message?: string };
-    logger().error({
-      merchantName,
-      error: error.message,
-      status: error?.response?.status,
-      data: error?.response?.data,
-    }, 'Error getting or creating expense account');
+    const error = e as {
+      response?: { status?: number; data?: unknown };
+      message?: string;
+    };
+    logger().error(
+      {
+        merchantName,
+        error: error.message,
+        status: error?.response?.status,
+        data: error?.response?.data,
+      },
+      'Error getting or creating expense account',
+    );
     throw e;
   }
 }
@@ -293,10 +362,13 @@ export async function upsertConfig(state: string): Promise<AxiosResponse> {
     return result;
   } catch (e: unknown) {
     const error = e as { response?: { status?: number }; message?: string };
-    logger().error({
-      error: error.message,
-      status: error?.response?.status,
-    }, 'Error upserting config');
+    logger().error(
+      {
+        error: error.message,
+        status: error?.response?.status,
+      },
+      'Error upserting config',
+    );
     throw e;
   }
 }
@@ -304,7 +376,9 @@ export async function upsertConfig(state: string): Promise<AxiosResponse> {
 export async function getConfig(): Promise<AxiosResponse> {
   logger().debug('Getting config from Firefly');
   try {
-    const result = await fireflyAxios.get('/api/v1/preferences/israeli-bank-importer');
+    const result = await fireflyAxios.get(
+      '/api/v1/preferences/israeli-bank-importer',
+    );
     logger().debug('Got config from Firefly');
     return result;
   } catch (e: unknown) {
@@ -312,10 +386,13 @@ export async function getConfig(): Promise<AxiosResponse> {
     if (error?.response?.status === 404) {
       logger().debug('Config not found in Firefly (404)');
     } else {
-      logger().error({
-        error: error.message,
-        status: error?.response?.status,
-      }, 'Error getting config');
+      logger().error(
+        {
+          error: error.message,
+          status: error?.response?.status,
+        },
+        'Error getting config',
+      );
     }
     throw e;
   }

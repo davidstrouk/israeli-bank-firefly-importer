@@ -123,7 +123,7 @@ export function getFlatUsers(
     }));
 }
 
-export function parseScrapResult(
+export function parseScrapeResult(
   results: ScraperScrapResult[],
   flatUsers: UserOptions[],
 ): unknown[] {
@@ -150,7 +150,7 @@ export function logErrorResult(
   results: ScraperScrapResult[],
   flatUsers: UserOptions[],
 ): void {
-  const error = results
+  const failedResults = results
     .map((x, i) => (x.success
       ? null
       : {
@@ -159,18 +159,45 @@ export function logErrorResult(
       }))
     .filter(
       (x): x is ScraperScrapResult & { options: UserOptions } => x !== null,
-    )
+    );
+
+  if (failedResults.length === 0) {
+    return;
+  }
+
+  // Log each failure individually with full details
+  failedResults.forEach((x) => {
+    logger().error(
+      {
+        companyType: x.options.type,
+        accountName: x.options.name,
+        errorType: x.errorType || 'UNKNOWN',
+        errorMessage: x.errorMessage || 'Unknown error',
+        hasAccounts: !!x.accounts,
+        accountCount: x.accounts?.length || 0,
+        startDate: x.options.scrapFrom?.format('YYYY-MM-DD'),
+      },
+      `Scraping failed for ${x.options.type}${
+        x.options.name ? ` (${x.options.name})` : ''
+      }`,
+    );
+  });
+
+  // Also log a summary
+  const error = failedResults
     .map(
-      (x) => `${x.options.type} ${
+      (x) => `${x.options.type}${
         x.options.name ? ` (${x.options.name})` : ''
       } failed with type ${x.errorType || 'UNKNOWN'}: ${
         x.errorMessage || 'Unknown error'
       }`,
     )
     .join(', ');
-  if (error) {
-    logger().error({ error }, 'Scrapping failed. Ignoring...');
-  }
+
+  logger().error(
+    { error, failedCount: failedResults.length },
+    'Scrapping failed summary',
+  );
 }
 
 interface LightAccount {
@@ -194,10 +221,25 @@ export function getLightResult(results: ScraperScrapResult[]): LightResult[] {
   }));
 }
 
-export async function scrapAccounts(
+export async function scrapeAccounts(
   flatUsers: UserOptions[],
 ): Promise<ScraperScrapResult[]> {
   const scraperConfig: ScraperConfig = config.get('scraper');
+
+  // Log what we're about to scrape
+  logger().info(
+    {
+      accountCount: flatUsers.length,
+      accounts: flatUsers.map((user) => ({
+        type: user.type,
+        name: user.name,
+        startDate: user.scrapFrom?.format('YYYY-MM-DD'),
+      })),
+      parallel: scraperConfig.parallel,
+    },
+    'Starting to scrape accounts',
+  );
+
   const actions = flatUsers
     .map((user, index) => {
       const options = {
@@ -213,7 +255,22 @@ export async function scrapAccounts(
       (action): action is () => Promise<ScraperScrapResult> => action !== null,
     );
 
-  return runActions(actions, scraperConfig.parallel);
+  const results = await runActions(actions, scraperConfig.parallel);
+
+  // Log summary of scraping results
+  const successCount = results.filter((r) => r.success).length;
+  const failureCount = results.length - successCount;
+
+  logger().info(
+    {
+      total: results.length,
+      successful: successCount,
+      failed: failureCount,
+    },
+    'Scraping complete',
+  );
+
+  return results;
 }
 
 async function scrape(
@@ -223,10 +280,52 @@ async function scrape(
   const scraper = createScraper(options as never);
   logger().debug({ options }, 'Scrapping...');
   try {
-    return await scraper.scrape(credentials as never);
+    const result = await scraper.scrape(credentials as never);
+
+    // Log the result details for debugging
+    if (result.success) {
+      logger().debug(
+        {
+          companyId: options.companyId,
+          accountCount: result.accounts?.length || 0,
+          totalTransactions:
+            result.accounts?.reduce(
+              (sum, acc: { txns?: unknown[] }) => sum + (acc.txns?.length || 0),
+              0,
+            ) || 0,
+        },
+        'Scraping successful',
+      );
+    } else {
+      logger().error(
+        {
+          companyId: options.companyId,
+          errorType: result.errorType,
+          errorMessage: result.errorMessage,
+          hasAccounts: !!result.accounts,
+        },
+        'Scraping failed with error from scraper',
+      );
+    }
+
+    return result;
   } catch (error: unknown) {
-    const err = error as Error;
-    logger().error({ error: err, options }, 'Unexpected error while scrapping');
+    const err = error as Error & { response?: unknown; stack?: string };
+
+    // Log detailed error information
+    logger().error(
+      {
+        companyId: options.companyId,
+        errorName: err.name,
+        errorMessage: err.message,
+        errorStack: err.stack,
+        response: err.response
+          ? JSON.stringify(err.response).substring(0, 500)
+          : undefined,
+      },
+      'Unexpected error while scrapping - caught exception',
+    );
+
     return {
       success: false,
       errorType: 'GENERAL_ERROR',

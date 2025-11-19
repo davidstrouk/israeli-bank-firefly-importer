@@ -1,6 +1,8 @@
 import moment from 'moment';
 import type { Provider as Config } from 'nconf';
+import type { AxiosResponse } from 'axios';
 import logger from '../logger.js';
+import { createAccount, getAccounts } from '../firefly.js';
 
 interface Account {
   id: string;
@@ -169,6 +171,428 @@ export function convertCreditCardPayments(
         stack: err.stack,
       },
       'Error in credit card payment detection',
+    );
+
+    return {
+      transfers: [],
+      remaining: transactions,
+      all: transactions,
+    };
+  }
+}
+
+/**
+ * Helper function to check if a day of month is within a range
+ * @param day - Day of the month (1-31)
+ * @param range - Range string like "1-4" or "15-20"
+ * @returns true if day is within the range
+ */
+function isDayInRange(day: number, range: string): boolean {
+  const parts = range.split('-');
+  if (parts.length !== 2) {
+    return false;
+  }
+  const start = parseInt(parts[0] || '', 10);
+  const end = parseInt(parts[1] || '', 10);
+  if (Number.isNaN(start) || Number.isNaN(end)) {
+    return false;
+  }
+  return day >= start && day <= end;
+}
+
+/**
+ * Helper function to get or create a credit card account
+ * @param accountName - Account name/number
+ * @param accountsMap - Current accounts map
+ * @param accountKeyToId - Mapping of account keys to IDs
+ * @returns Account ID
+ */
+async function getOrCreateCreditCardAccount(
+  accountName: string,
+  accountsMap: AccountsMap,
+  accountKeyToId: Record<string, string>,
+): Promise<string | undefined> {
+  // Check local cache first
+  if (accountKeyToId[accountName]) {
+    logger().debug(
+      { accountName, accountId: accountKeyToId[accountName] },
+      'Using cached credit card account',
+    );
+    return accountKeyToId[accountName];
+  }
+
+  try {
+    // Fetch all asset accounts (including credit cards) to check if account already exists
+    logger().debug(
+      { accountName },
+      'Checking if credit card account exists in Firefly',
+    );
+    const allAssetAccounts: AxiosResponse = await getAccounts();
+    const existingAccount = allAssetAccounts.data.data.find(
+      (acc: {
+        attributes: {
+          account_number: string;
+          name: string;
+          account_role?: string;
+        };
+      }) => (acc.attributes.account_number === accountName
+          || acc.attributes.name === accountName)
+        && acc.attributes.account_role === 'ccAsset',
+    );
+
+    if (existingAccount) {
+      const existingId = existingAccount.id;
+
+      // Add to maps for future lookups
+      // eslint-disable-next-line no-param-reassign
+      accountsMap[accountName] = {
+        id: existingId,
+        kind: 'credit-card',
+        type: accountName,
+      };
+      // eslint-disable-next-line no-param-reassign
+      accountKeyToId[accountName] = existingId;
+
+      logger().debug(
+        { accountName, accountId: existingId },
+        'Found existing credit card account',
+      );
+
+      return existingId;
+    }
+
+    // Account doesn't exist, create it
+    logger().info(
+      { accountName },
+      'Credit card account not found in Firefly, creating it',
+    );
+
+    const result = await createAccount({
+      name: accountName,
+      account_number: accountName,
+      type: 'asset',
+      account_role: 'ccAsset',
+      credit_card_type: 'monthlyFull',
+      monthly_payment_date: moment().format('YYYY-MM-DD'),
+    });
+
+    const newAccountId = result.data.data.id;
+
+    // Add to maps
+    // eslint-disable-next-line no-param-reassign
+    accountsMap[accountName] = {
+      id: newAccountId,
+      kind: 'credit-card',
+      type: accountName,
+    };
+    // eslint-disable-next-line no-param-reassign
+    accountKeyToId[accountName] = newAccountId;
+
+    logger().info(
+      { accountName, accountId: newAccountId },
+      'Created new credit card account',
+    );
+
+    return newAccountId;
+  } catch (error: unknown) {
+    const err = error as { response?: { status?: number; data?: unknown } };
+
+    // If we got a 422, the account was likely created by a parallel process
+    // Try to fetch it one more time
+    if (err?.response?.status === 422) {
+      logger().debug(
+        { accountName },
+        'Got 422 error, account may have been created by another process. Fetching again...',
+      );
+
+      try {
+        const allAssetAccounts: AxiosResponse = await getAccounts();
+        const existingAccount = allAssetAccounts.data.data.find(
+          (acc: {
+            attributes: {
+              account_number: string;
+              name: string;
+              account_role?: string;
+            };
+          }) => (acc.attributes.account_number === accountName
+              || acc.attributes.name === accountName)
+            && acc.attributes.account_role === 'ccAsset',
+        );
+
+        if (existingAccount) {
+          const existingId = existingAccount.id;
+
+          // Add to maps
+          // eslint-disable-next-line no-param-reassign
+          accountsMap[accountName] = {
+            id: existingId,
+            kind: 'credit-card',
+            type: accountName,
+          };
+          // eslint-disable-next-line no-param-reassign
+          accountKeyToId[accountName] = existingId;
+
+          logger().info(
+            { accountName, accountId: existingId },
+            'Found existing credit card account after 422 error',
+          );
+
+          return existingId;
+        }
+      } catch (fetchError) {
+        logger().error(
+          { error: fetchError, accountName },
+          'Failed to fetch account after 422 error',
+        );
+      }
+    }
+
+    logger().error(
+      { error, accountName },
+      'Failed to create or fetch credit card account',
+    );
+    return undefined;
+  }
+}
+
+/**
+ * Converts credit card charge withdrawals to transfers using manual mapping
+ * Maps transactions based on description and source account to destination credit card account
+ */
+export async function convertCreditCardCharges(
+  transactions: Transaction[],
+  accountsMap: AccountsMap | undefined,
+  config: Config,
+): Promise<ConversionResult> {
+  if (!accountsMap) {
+    logger().debug('No accountsMap provided for credit card charge detection');
+    return {
+      transfers: [],
+      remaining: transactions,
+      all: transactions,
+    };
+  }
+
+  try {
+    // Get creditCardChargeMapping configuration
+    const chargeMappingConfig: Array<{
+      transactionDesc: string;
+      sourceAccount: string;
+      destinationAccount: string;
+      dayOfMonthRange?: string; // Optional: "1-4" means days 1-4 of the month
+    }> = config?.get('creditCardChargeMapping') || [];
+
+    if (chargeMappingConfig.length === 0) {
+      logger().debug('No creditCardChargeMapping configuration found');
+      return {
+        transfers: [],
+        remaining: transactions,
+        all: transactions,
+      };
+    }
+
+    // Build a reverse map from account ID to account number/name
+    const accountIdToKey: Record<string, string> = {};
+    Object.entries(accountsMap).forEach(([accountKey, account]) => {
+      accountIdToKey[account.id] = accountKey;
+    });
+
+    // Build a map of account name/number to account ID
+    const accountKeyToId: Record<string, string> = {};
+    Object.entries(accountsMap).forEach(([accountKey, account]) => {
+      accountKeyToId[accountKey] = account.id;
+    });
+
+    logger().info(
+      {
+        mappingRules: chargeMappingConfig.length,
+        mappingRulesSample: chargeMappingConfig.slice(0, 5),
+      },
+      'Loaded credit card charge mapping configuration',
+    );
+
+    const convertedTransfers: Transaction[] = [];
+    const processedTxIds = new Set<string>();
+    const remainingTxs: Transaction[] = [];
+
+    // Track statistics for debugging
+    let withdrawalCount = 0;
+    let matchedCount = 0;
+    let unmatchedWithDescCount = 0;
+    let createdAccountsCount = 0;
+
+    // Process each transaction (using for loop to support async)
+    // eslint-disable-next-line no-restricted-syntax
+    for (const tx of transactions) {
+      // Only process withdrawals
+      if (tx.type !== 'withdrawal') {
+        remainingTxs.push(tx);
+        continue;
+      }
+
+      withdrawalCount += 1;
+
+      // Get source account name/number
+      const sourceAccountKey = tx.source_id
+        ? accountIdToKey[tx.source_id]
+        : undefined;
+
+      if (!tx.description || !sourceAccountKey) {
+        remainingTxs.push(tx);
+        continue;
+      }
+
+      // Get day of month from transaction date
+      const txDate = moment(tx.date);
+      const dayOfMonth = txDate.isValid() ? txDate.date() : 0;
+
+      // Try to find a matching rule
+      const matchingRule = chargeMappingConfig.find((rule) => {
+        // Check basic fields match
+        if (
+          rule.transactionDesc !== tx.description
+          || rule.sourceAccount !== sourceAccountKey
+        ) {
+          return false;
+        }
+
+        // If dayOfMonthRange is specified, check if transaction day is in range
+        if (rule.dayOfMonthRange) {
+          if (
+            dayOfMonth === 0
+            || !isDayInRange(dayOfMonth, rule.dayOfMonthRange)
+          ) {
+            return false;
+          }
+        }
+
+        return true;
+      });
+
+      if (matchingRule) {
+        // Find or create destination account ID
+        let destinationAccountId = accountKeyToId[matchingRule.destinationAccount];
+
+        // If account doesn't exist, create it
+        if (!destinationAccountId) {
+          const wasCreated = !accountKeyToId[matchingRule.destinationAccount];
+          // eslint-disable-next-line no-await-in-loop
+          destinationAccountId = await getOrCreateCreditCardAccount(
+            matchingRule.destinationAccount,
+            accountsMap,
+            accountKeyToId,
+          );
+          if (wasCreated && destinationAccountId) {
+            createdAccountsCount += 1;
+          }
+        }
+
+        if (destinationAccountId) {
+          // Convert to transfer
+          const transfer: Transaction = {
+            ...tx,
+            type: 'transfer',
+            destination_id: destinationAccountId,
+            description: tx.description,
+            notes: tx.notes
+              ? `${tx.notes}\nCredit Card Charge (mapped)`
+              : 'Credit Card Charge (mapped)',
+          };
+
+          convertedTransfers.push(transfer);
+          processedTxIds.add(tx.external_id);
+          matchedCount += 1;
+
+          logger().debug(
+            {
+              txId: tx.external_id,
+              amount: tx.amount,
+              description: tx.description,
+              sourceAccount: sourceAccountKey,
+              destinationAccount: matchingRule.destinationAccount,
+              destinationAccountId,
+              dayOfMonth: matchingRule.dayOfMonthRange ? dayOfMonth : undefined,
+              dayOfMonthRange: matchingRule.dayOfMonthRange,
+            },
+            'Converted credit card charge to transfer using mapping',
+          );
+        } else {
+          logger().warn(
+            {
+              txId: tx.external_id,
+              description: tx.description,
+              sourceAccount: sourceAccountKey,
+              destinationAccount: matchingRule.destinationAccount,
+            },
+            'Destination account not found in accountsMap',
+          );
+          remainingTxs.push(tx);
+        }
+      } else {
+        // Check if this transaction has a creditCardDesc description but no mapping
+        const creditCardDescConfig: Array<{
+          desc: string;
+          creditCard: string;
+        }> = config?.get('creditCardDesc') || [];
+        const creditCardDescriptions = new Set(
+          creditCardDescConfig.map((entry) => entry.desc),
+        );
+
+        if (creditCardDescriptions.has(tx.description)) {
+          unmatchedWithDescCount += 1;
+          if (unmatchedWithDescCount <= 3) {
+            logger().info(
+              {
+                txId: tx.external_id,
+                description: tx.description,
+                sourceAccount: sourceAccountKey,
+                dayOfMonth,
+                date: tx.date,
+              },
+              'Transaction has creditCardDesc but no mapping rule',
+            );
+          }
+        }
+        remainingTxs.push(tx);
+      }
+    }
+
+    // Log statistics
+    logger().info(
+      {
+        totalTransactions: transactions.length,
+        withdrawals: withdrawalCount,
+        matchedAndConverted: matchedCount,
+        unmatchedWithCreditCardDesc: unmatchedWithDescCount,
+        createdAccounts: createdAccountsCount,
+        convertedCharges: convertedTransfers.length,
+      },
+      'Credit card charge detection statistics',
+    );
+
+    if (convertedTransfers.length > 0) {
+      logger().info(
+        {
+          convertedCharges: convertedTransfers.length,
+          total: transactions.length,
+        },
+        'Converted credit card charges to transfers',
+      );
+    }
+
+    return {
+      transfers: convertedTransfers,
+      remaining: remainingTxs,
+      all: [...convertedTransfers, ...remainingTxs],
+    };
+  } catch (error: unknown) {
+    const err = error as Error;
+    logger().error(
+      {
+        error: err.message,
+        stack: err.stack,
+      },
+      'Error in credit card charge detection',
     );
 
     return {

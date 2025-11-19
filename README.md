@@ -12,7 +12,8 @@ Using [Israeli bank scrapper](https://github.com/eshaham/israeli-bank-scrapers) 
 6. Remove duplicate transactions that already exist in Firefly based on external ID.
 7. **Auto-detect transfers**: Automatically identifies if there's a deposit and withdrawal from two different accounts with the same amount within a few days, and converts them into a single transfer transaction between accounts.
 8. **Auto-detect credit card payments**: Automatically identifies bank withdrawals that are credit card payments (by matching internal reference to credit card account number) and converts them to transfer transactions.
-9. **Credit card merchant accounts**: Credit card transactions automatically create expense accounts based on merchant names, making it easier to track where you spent money. 
+9. **Credit card charge mapping**: Manually map credit card charge transactions to convert them from withdrawals to transfers. Configure which bank account charges should be converted to transfers to which credit card account. See [Credit Card Charge Mapping Guide](CREDIT_CARD_CHARGE_MAPPING.md).
+10. **Credit card merchant accounts**: Credit card transactions automatically create expense accounts based on merchant names, making it easier to track where you spent money. 
 
 ## Installing
 ### Prerequisite

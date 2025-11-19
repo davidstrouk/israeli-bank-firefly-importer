@@ -32,10 +32,19 @@
       "creditCard": "visaCal"
     },
     {
+      "desc": "כאל",
+      "creditCard": "visaCal"
+    },
+    {
       "desc": "מקס איט פיננ-י",
       "creditCard": "max"
+    },
+    {
+      "desc": "פרימיום אקספ-י",
+      "creditCard": "amex"
     }
   ],
+  "creditCardChargeMapping": [],
   "scraper": {
     "parallel": true,
     "options": {

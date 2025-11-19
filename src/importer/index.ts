@@ -20,14 +20,15 @@ import {
   getLightResult,
   getSuccessfulScrappedUsers,
   logErrorResult,
-  parseScrapResult,
-  scrapAccounts,
+  parseScrapeResult,
+  scrapeAccounts,
 } from './scrapper.js';
 import logger from '../logger.js';
 import { getStateWithLastImport } from './last-import-helper.js';
 import {
   applyTransferDetection,
   convertCreditCardPayments,
+  convertCreditCardCharges,
 } from './transfer-detector.js';
 
 interface Account {
@@ -100,6 +101,7 @@ interface FireflyTransaction {
     transactions: Array<{
       type: string;
       external_id?: string;
+      internal_reference?: string;
       date: string;
       description?: string;
       amount: string;
@@ -206,6 +208,10 @@ export default async function doImport(options: ImportOptions): Promise<void> {
 
   // Handle backfill mode
   if (backfill) {
+    // First, backfill merchant destination accounts for credit card transactions
+    await backfillCreditCardDestinations(dryRun ?? false);
+
+    // Then, backfill transfer detection
     await backfillTransfers(dryRun ?? false, dateTolerance ?? 2, since);
     return;
   }
@@ -220,12 +226,12 @@ export default async function doImport(options: ImportOptions): Promise<void> {
     lastImportState as Record<string, string> | undefined,
     since,
   );
-  const scrapResult = await scrapAccounts(flatUsers);
+  const scrapResult = await scrapeAccounts(flatUsers);
   logErrorResult(scrapResult, flatUsers);
   if (logger().level === 'debug') {
     logger().debug({ results: getLightResult(scrapResult) }, 'Scrape result');
   }
-  const accounts = parseScrapResult(
+  const accounts = parseScrapeResult(
     scrapResult,
     flatUsers,
   ) as unknown as ScrapperAccount[];
@@ -308,6 +314,21 @@ export default async function doImport(options: ImportOptions): Promise<void> {
     'Credit card payment detection complete',
   );
 
+  // Second, detect and convert credit card charges to transfers
+  logger().info('Detecting and converting credit card charges to transfers...');
+  const ccChargeResult = await convertCreditCardCharges(
+    ccPaymentResult.remaining,
+    accountsMaps,
+    config,
+  );
+  logger().debug(
+    {
+      ccChargesConverted: ccChargeResult.transfers.length,
+      remaining: ccChargeResult.remaining.length,
+    },
+    'Credit card charge detection complete',
+  );
+
   // Then, detect and convert matching deposit/withdrawal pairs to transfers
   logger().info(
     'Detecting and converting matching deposit/withdrawal pairs to transfers...',
@@ -347,9 +368,9 @@ export default async function doImport(options: ImportOptions): Promise<void> {
     'Found existing transfers',
   );
 
-  // Apply transfer detection to remaining transactions (after credit card payment detection)
+  // Apply transfer detection to remaining transactions (after credit card payment and charge detection)
   const transferDetectedResult = applyTransferDetection(
-    ccPaymentResult.remaining as unknown as Array<{
+    ccChargeResult.remaining as unknown as Array<{
       type: string;
       date: string;
       amount: number;
@@ -376,9 +397,10 @@ export default async function doImport(options: ImportOptions): Promise<void> {
     }>,
   );
 
-  // Combine credit card payment transfers with regular transfers
+  // Combine credit card payment transfers, charge transfers, and regular transfers
   const transferDetectedTxs = [
     ...ccPaymentResult.transfers,
+    ...ccChargeResult.transfers,
     ...transferDetectedResult,
   ];
 
@@ -406,7 +428,12 @@ export default async function doImport(options: ImportOptions): Promise<void> {
 
   const currentTxMap = await getMappedTransactions(scrapeFormattedTxs);
 
-  const toCreate = deduplicatedTxs.filter((x) => !currentTxMap[x.external_id]);
+  // Helper function to generate the same key format as getExistsTxMap
+  const getTxKey = (tx: FormattedTransaction) => (tx.internal_reference
+    ? `${tx.external_id}:${tx.internal_reference}`
+    : tx.external_id);
+
+  const toCreate = deduplicatedTxs.filter((x) => !currentTxMap[getTxKey(x)]);
   const insertDebugData = logger().level === 'debug' ? { toCreate } : {};
 
   if (dryRun) {
@@ -426,8 +453,7 @@ export default async function doImport(options: ImportOptions): Promise<void> {
   }
 
   const toTypeUpdate = deduplicatedTxs.filter(
-    (x) => currentTxMap[x.external_id]
-      && currentTxMap[x.external_id]?.type !== x.type,
+    (x) => currentTxMap[getTxKey(x)] && currentTxMap[getTxKey(x)]?.type !== x.type,
   );
   const updateDebugData = logger().level === 'debug' ? { toTypeUpdate } : {};
 
@@ -442,7 +468,7 @@ export default async function doImport(options: ImportOptions): Promise<void> {
       'Updating transactions types to firefly...',
     );
     await toTypeUpdate.reduce((p, x, i) => {
-      const existingTx = currentTxMap[x.external_id];
+      const existingTx = currentTxMap[getTxKey(x)];
       if (!existingTx) return p;
       return p.then(() => innerUpdateTx(existingTx, x, i + 1));
     }, Promise.resolve());
@@ -451,7 +477,7 @@ export default async function doImport(options: ImportOptions): Promise<void> {
   // Check for existing credit card transactions without destination accounts
   // and add destination accounts based on merchant names
   const toAddDestination = deduplicatedTxs.filter((x) => {
-    const existing = currentTxMap[x.external_id];
+    const existing = currentTxMap[getTxKey(x)];
     if (!existing) return false;
     // Check if it's a credit card withdrawal that needs a destination account
     // The new transaction has a destination_id but the existing one doesn't
@@ -478,7 +504,7 @@ export default async function doImport(options: ImportOptions): Promise<void> {
         'Adding destination accounts to existing credit card transactions...',
       );
       await toAddDestination.reduce((p, x, i) => {
-        const existingTx = currentTxMap[x.external_id];
+        const existingTx = currentTxMap[getTxKey(x)];
         if (!existingTx) return p;
         return p.then(() => innerUpdateTx(existingTx, x, i + 1));
       }, Promise.resolve());
@@ -487,8 +513,8 @@ export default async function doImport(options: ImportOptions): Promise<void> {
 
   if (!skipEdit) {
     const toUpdate = deduplicatedTxs.filter(
-      (x) => currentTxMap[x.external_id]
-        && currentTxMap[x.external_id]?.type === x.type
+      (x) => currentTxMap[getTxKey(x)]
+        && currentTxMap[getTxKey(x)]?.type === x.type
         // Don't include transactions that are being updated for destination accounts
         && !toAddDestination.some((dest) => dest.external_id === x.external_id),
     );
@@ -504,7 +530,7 @@ export default async function doImport(options: ImportOptions): Promise<void> {
         'Updating transactions to firefly...',
       );
       await toUpdate.reduce((p, x, i) => {
-        const existingTx = currentTxMap[x.external_id];
+        const existingTx = currentTxMap[getTxKey(x)];
         if (!existingTx) return p;
         return p.then(() => innerUpdateTx(existingTx, x, i + 1));
       }, Promise.resolve());
@@ -534,6 +560,7 @@ function getExistsTxMap(fireflyData: FireflyTransaction[]): ExistsTxMap {
     .map((x) => ({
       type: x.attributes.transactions[0]?.type,
       ext_id: x.attributes.transactions[0]?.external_id,
+      internalRef: x.attributes.transactions[0]?.internal_reference,
       id: x.id,
       source_id: x.attributes.transactions[0]?.source_id,
       destination_id: x.attributes.transactions[0]?.destination_id,
@@ -543,13 +570,24 @@ function getExistsTxMap(fireflyData: FireflyTransaction[]): ExistsTxMap {
       (
         m: ExistsTxMap,
         {
-          id, ext_id: extId, type, source_id, destination_id, description,
+          id,
+          ext_id: extId,
+          internalRef,
+          type,
+          source_id,
+          destination_id,
+          description,
         },
       ) => {
         if (!extId || !type) return m;
+
+        // Create a unique key using both external_id and internal_reference
+        // This prevents duplicates with the same external_id but different internal_reference
+        const key = internalRef ? `${extId}:${internalRef}` : extId;
+
         return {
           ...m,
-          [extId]: {
+          [key]: {
             id,
             type,
             source_id,
@@ -595,7 +633,7 @@ async function getFireflyAccountsBalance(): Promise<FireflyAccountBalance[]> {
 
 function logBalanceOutOfSync(
   fireflyAccounts: FireflyAccountBalance[],
-  scrapeAccounts: ScrapperAccount[],
+  scrapedAccounts: ScrapperAccount[],
 ): void {
   const fireflyAccountsBalanceMap = fireflyAccounts.reduce(
     (m: Record<string, number>, x) => ({
@@ -604,7 +642,7 @@ function logBalanceOutOfSync(
     }),
     {},
   );
-  scrapeAccounts
+  scrapedAccounts
     .map((x) => ({
       accountNumber: x.accountNumber,
       scrapeBalance: x.balance,
@@ -1269,6 +1307,217 @@ function getExternalId(tx: ScrappedTransaction & { account: Account }): string {
 }
 
 /**
+ * Backfill destination accounts for existing credit card transactions
+ */
+async function backfillCreditCardDestinations(
+  isDryRun: boolean,
+): Promise<void> {
+  logger().info(
+    { isDryRun },
+    'Starting credit card destination account backfill',
+  );
+
+  if (isDryRun) {
+    logger().info('🔍 DRY RUN MODE - No changes will be made to Firefly');
+  }
+
+  // Get all accounts from Firefly to identify credit card accounts
+  logger().info('Fetching all accounts from Firefly...');
+  const accountsResponse = await getAccounts();
+  const allAccounts = accountsResponse.data.data;
+
+  logger().debug({ allAccounts }, 'All Firefly accounts');
+
+  // Build a set of credit card account IDs
+  const creditCardAccountIds = new Set(
+    allAccounts
+      .filter(
+        (acc: { attributes: { type: string; account_role?: string } }) => acc.attributes.type === 'asset'
+          && acc.attributes.account_role === 'ccAsset',
+      )
+      .map((acc: { id: string }) => acc.id),
+  );
+
+  logger().info(
+    { creditCardAccounts: creditCardAccountIds.size },
+    'Found credit card accounts',
+  );
+
+  if (creditCardAccountIds.size === 0) {
+    logger().info('No credit card accounts found');
+    return;
+  }
+
+  // Get all withdrawal transactions from Firefly
+  logger().info('Fetching all transactions from Firefly...');
+  const allFireflyTxs = (await getAllTxs()) as Array<{
+    id: string;
+    attributes: {
+      transactions: Array<{
+        description?: string;
+        type: string;
+        source_id?: string;
+        destination_id?: string;
+        destination_name?: string;
+        amount?: string;
+        date?: string;
+      }>;
+    };
+  }>;
+
+  logger().debug({ allFireflyTxs }, 'All Firefly transactions');
+
+  logger().info(
+    { totalTransactions: allFireflyTxs.length },
+    'Retrieved transactions from Firefly',
+  );
+
+  // Filter for credit card withdrawals without destination accounts or with "Cash account" as destination
+  const txsNeedingDestination = allFireflyTxs
+    .map((tx) => ({
+      id: tx.id,
+      ...tx.attributes.transactions[0],
+    }))
+    .filter(
+      (tx) => tx.type === 'withdrawal'
+        && tx.source_id
+        && creditCardAccountIds.has(tx.source_id)
+        && tx.description
+        && (!tx.destination_id
+          || (tx.destination_id && tx.destination_name === 'Cash account')),
+    );
+
+  const withoutDestination = txsNeedingDestination.filter(
+    (tx) => !tx.destination_id,
+  ).length;
+  const withCashAccount = txsNeedingDestination.filter(
+    (tx) => tx.destination_id && tx.destination_name === 'Cash account',
+  ).length;
+
+  logger().info(
+    {
+      totalNeedingMerchant: txsNeedingDestination.length,
+      withoutDestination,
+      withCashAccount,
+    },
+    'Found credit card transactions needing merchant-specific destination accounts',
+  );
+
+  if (txsNeedingDestination.length === 0) {
+    logger().info(
+      '✅ All credit card transactions already have merchant-specific destination accounts',
+    );
+    return;
+  }
+
+  // Group by merchant to show summary
+  const merchantCounts: Record<string, number> = {};
+  txsNeedingDestination.forEach((tx) => {
+    const merchant = tx.description || 'Unknown';
+    merchantCounts[merchant] = (merchantCounts[merchant] || 0) + 1;
+  });
+
+  logger().info(
+    {
+      uniqueMerchants: Object.keys(merchantCounts).length,
+      topMerchants: Object.entries(merchantCounts)
+        .sort(([, a], [, b]) => b - a)
+        .slice(0, 10)
+        .map(([merchant, count]) => ({ merchant, count })),
+    },
+    'Transaction summary by merchant',
+  );
+
+  if (isDryRun) {
+    logger().info(
+      {
+        count: txsNeedingDestination.length,
+        merchants: Object.keys(merchantCounts).length,
+      },
+      '🔍 DRY RUN - Would add destination accounts to these transactions',
+    );
+    return;
+  }
+
+  // Process transactions
+  logger().info('Adding destination accounts to transactions...');
+  let successCount = 0;
+  let errorCount = 0;
+
+  /* eslint-disable no-await-in-loop */
+  for (let i = 0; i < txsNeedingDestination.length; i += 1) {
+    const tx = txsNeedingDestination[i];
+    if (!tx) continue;
+
+    try {
+      // Get or create expense account for merchant
+      const destinationId = await getOrCreateExpenseAccount(
+        tx.description!,
+        false,
+      );
+
+      if (destinationId) {
+        // Update the transaction
+        await updateTx(tx.id, [
+          {
+            ...tx,
+            destination_id: destinationId,
+          },
+        ]);
+
+        successCount += 1;
+
+        if ((successCount + errorCount) % 50 === 0) {
+          logger().info(
+            {
+              processed: successCount + errorCount,
+              successful: successCount,
+              errors: errorCount,
+              total: txsNeedingDestination.length,
+            },
+            'Progress update',
+          );
+        }
+      }
+    } catch (error: unknown) {
+      const err = error as { message?: string };
+      logger().error(
+        {
+          txId: tx.id,
+          merchant: tx.description,
+          error: err.message,
+        },
+        'Error adding destination account to transaction',
+      );
+      errorCount += 1;
+    }
+  }
+  /* eslint-enable no-await-in-loop */
+
+  logger().info(
+    {
+      successful: successCount,
+      errors: errorCount,
+      total: txsNeedingDestination.length,
+    },
+    '✅ Credit card destination backfill complete',
+  );
+
+  /* eslint-disable no-console */
+  console.log('\n=== Credit Card Destination Backfill Summary ===');
+  console.log(`✅ Successfully updated: ${successCount} transactions`);
+  if (errorCount > 0) {
+    console.log(`❌ Errors: ${errorCount} transactions`);
+  }
+  console.log(
+    `📊 Total processed: ${successCount + errorCount} of ${
+      txsNeedingDestination.length
+    }`,
+  );
+  /* eslint-enable no-console */
+}
+
+/**
  * Backfill existing transactions in Firefly III and convert matching pairs to transfers
  */
 async function backfillTransfers(
@@ -1323,14 +1572,24 @@ async function backfillTransfers(
     },
   );
 
-  logger().debug(
+  const creditCardAccounts = Object.entries(accountsMap).filter(
+    ([, a]) => a.kind === 'credit-card',
+  );
+
+  logger().info(
     {
       totalAccounts: Object.keys(accountsMap).length,
-      creditCards: Object.values(accountsMap).filter(
-        (a) => a.kind === 'credit-card',
-      ).length,
+      creditCards: creditCardAccounts.length,
+      creditCardAccountDetails: creditCardAccounts.map(
+        ([accountNumber, account]) => ({
+          accountNumber,
+          accountId: account.id,
+          accountName: account.type,
+          last4: accountNumber.slice(-4),
+        }),
+      ),
     },
-    'Built accounts map',
+    'Built accounts map with credit card details',
   );
 
   // Get all transactions from Firefly
@@ -1463,6 +1722,37 @@ async function backfillTransfers(
     'Credit card payment detection complete',
   );
 
+  // Second, detect and convert credit card charges to transfers
+  logger().info('Running credit card charge detection...');
+  const ccChargeResult = await convertCreditCardCharges(
+    ccPaymentResult.remaining as unknown as Array<{
+      type: string;
+      date: string;
+      amount: number;
+      description?: string;
+      notes?: string;
+      source_id?: string;
+      destination_id?: string;
+      external_id: string;
+      currency_code?: string;
+      category_name?: string;
+      internal_reference?: string;
+      tags?: string[];
+      process_date?: string;
+    }>,
+    accountsMap,
+    config,
+  );
+
+  logger().info(
+    {
+      originalCount: ccPaymentResult.remaining.length,
+      ccChargesConverted: ccChargeResult.transfers.length,
+      remaining: ccChargeResult.remaining.length,
+    },
+    'Credit card charge detection complete',
+  );
+
   // Import detectAndConvertTransfers from transfer-detector
   const { detectAndConvertTransfers } = await import('./transfer-detector.js');
 
@@ -1471,7 +1761,7 @@ async function backfillTransfers(
     'Running transfer detection algorithm on remaining transactions...',
   );
   const transferResult = detectAndConvertTransfers(
-    ccPaymentResult.remaining as unknown as Array<{
+    ccChargeResult.remaining as unknown as Array<{
       type: string;
       date: string;
       amount: number;
@@ -1523,15 +1813,20 @@ async function backfillTransfers(
     remaining: FormattedTransaction[];
   }
 
-  const result: TransferResult & { ccPayments: FormattedTransaction[] } = {
+  const result: TransferResult & {
+    ccPayments: FormattedTransaction[];
+    ccCharges: FormattedTransaction[];
+  } = {
     transfers: [
       ...ccPaymentResult.transfers,
+      ...ccChargeResult.transfers,
       ...transferResult.transfers,
     ] as unknown as FormattedTransaction[],
     duplicatesOfExisting:
       transferResult.duplicatesOfExisting as unknown as DuplicatePair[],
     remaining: transferResult.remaining as unknown as FormattedTransaction[],
     ccPayments: ccPaymentResult.transfers as unknown as FormattedTransaction[],
+    ccCharges: ccChargeResult.transfers as unknown as FormattedTransaction[],
   };
 
   if (
@@ -1544,10 +1839,12 @@ async function backfillTransfers(
 
   // Calculate transfer counts for display and processing
   const regularTransfers = result.transfers.filter(
-    (t) => !result.ccPayments.includes(t),
+    (t) => !result.ccPayments.includes(t) && !result.ccCharges.includes(t),
   );
   const ccPaymentCount = result.ccPayments.length;
+  const ccChargeCount = result.ccCharges.length;
   const transactionsToDelete = ccPaymentCount
+    + ccChargeCount
     + regularTransfers.length * 2
     + result.duplicatesOfExisting.length * 2;
 
@@ -1562,6 +1859,30 @@ async function backfillTransfers(
       );
 
       console.log(`${index + 1}. Credit Card Payment:`);
+      console.log(
+        `   Amount: ${transfer.amount} ${transfer.currency_code || ''}`,
+      );
+      console.log(`   Date: ${transfer.date}`);
+      console.log(`   Description: ${transfer.description}`);
+      console.log(`   From: Account ${transfer.source_id}`);
+      console.log(`   To: Credit Card ${transfer.destination_id}`);
+      console.log(`   Internal Reference: ${transfer.internal_reference}`);
+      if (originalTx) {
+        console.log(`   Will delete withdrawal transaction: ${originalTx.id}`);
+      }
+      console.log('');
+    });
+  }
+
+  if (result.ccCharges.length > 0) {
+    console.log('\n=== Credit Card Charges to Convert ===\n');
+    result.ccCharges.forEach((transfer, index) => {
+      // Find original transaction
+      const originalTx = formattedTxs.find(
+        (tx) => tx.external_id === transfer.external_id,
+      );
+
+      console.log(`${index + 1}. Credit Card Charge:`);
       console.log(
         `   Amount: ${transfer.amount} ${transfer.currency_code || ''}`,
       );
@@ -1648,6 +1969,7 @@ async function backfillTransfers(
     logger().info(
       {
         ccPayments: ccPaymentCount,
+        ccCharges: ccChargeCount,
         regularTransfers: regularTransfers.length,
         duplicatePairs: result.duplicatesOfExisting.length,
         transactionsToDelete,
@@ -1662,6 +1984,7 @@ async function backfillTransfers(
   logger().warn(
     {
       ccPayments: ccPaymentCount,
+      ccCharges: ccChargeCount,
       regularTransfers: regularTransfers.length,
       duplicatePairs: result.duplicatesOfExisting.length,
       transactionsToDelete,
@@ -1777,6 +2100,57 @@ async function backfillTransfers(
     }
   }
 
+  // Process credit card charges (only delete withdrawal, no deposit to delete)
+  for (let i = 0; i < result.ccCharges.length; i += 1) {
+    const transfer = result.ccCharges[i];
+    if (!transfer) continue;
+
+    const originalTx = formattedTxs.find(
+      (tx) => tx.external_id === transfer.external_id,
+    );
+
+    if (!originalTx || !originalTx.id) {
+      logger().error(
+        {
+          transfer: transfer.external_id,
+        },
+        'Could not find original credit card charge transaction',
+      );
+      errorCount += 1;
+      continue;
+    }
+
+    try {
+      // Delete the original withdrawal transaction
+      await deleteTx(originalTx.id as string);
+
+      // Create the transfer transaction
+      await createTx([transfer as unknown as { [key: string]: unknown }]);
+
+      successCount += 1;
+      if (successCount % 10 === 0) {
+        logger().info(
+          {
+            completed: successCount,
+            total: result.transfers.length,
+          },
+          'Progress update',
+        );
+      }
+    } catch (error: unknown) {
+      const err = error as Error;
+      logger().error(
+        {
+          error: err.message,
+          transfer: transfer.external_id,
+          originalId: originalTx.id,
+        },
+        'Error converting credit card charge',
+      );
+      errorCount += 1;
+    }
+  }
+
   // Process regular transfer pairs (delete both withdrawal and deposit)
   for (let i = 0; i < regularTransfers.length; i += 1) {
     const transfer = regularTransfers[i];
@@ -1853,6 +2227,7 @@ async function backfillTransfers(
   console.log('\n=== Summary ===');
   console.log(`✅ Successfully converted to transfers: ${successCount}`);
   console.log(`   - Credit card payments: ${result.ccPayments.length}`);
+  console.log(`   - Credit card charges: ${result.ccCharges.length}`);
   console.log(`   - Regular transfer pairs: ${regularTransfers.length}`);
   console.log(
     `✅ Successfully removed duplicates: ${duplicateDeleteCount} pairs`,
@@ -1863,11 +2238,15 @@ async function backfillTransfers(
 
   // Calculate transaction reduction
   // CC payments: 1 withdrawal -> 1 transfer (no reduction)
+  // CC charges: 1 withdrawal -> 1 transfer (no reduction)
   // Regular transfers: 1 withdrawal + 1 deposit -> 1 transfer (reduction of 1)
   // Duplicates: 1 withdrawal + 1 deposit -> deleted (reduction of 2)
   const regularTransferCount = regularTransfers.length;
-  const totalBefore = ccPaymentCount + regularTransferCount * 2 + duplicateDeleteCount * 2;
-  const totalAfter = ccPaymentCount + regularTransferCount;
+  const totalBefore = ccPaymentCount
+    + ccChargeCount
+    + regularTransferCount * 2
+    + duplicateDeleteCount * 2;
+  const totalAfter = ccPaymentCount + ccChargeCount + regularTransferCount;
   const totalReduction = totalBefore - totalAfter;
 
   console.log(

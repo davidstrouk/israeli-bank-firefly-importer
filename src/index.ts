@@ -102,7 +102,9 @@ Options:
   --help, -h              Show this help message
   --dry-run               Run without making changes (preview mode)
   --since YYYY-MM-DD      Process transactions since this date
-  --backfill              Backfill existing transactions (convert to transfers)
+  --backfill              Backfill existing transactions:
+                          - Convert matching deposit/withdrawal pairs to transfers
+                          - Add merchant destination accounts to credit card transactions
   --date-tolerance N      Days tolerance for matching transfers (default: 2)
   --cleanup               Drop all state and clean up
   --remove-duplicates     Remove duplicate transactions

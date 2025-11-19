@@ -34,7 +34,9 @@ async function paginate(url: string, query?: string): Promise<unknown[]> {
     limit: config.get('firefly:limit'),
     ...(query ? { query } : {}),
   });
-  let nextPage: string | null = `${url}?${urlSearchParams}`;
+  // Use & if URL already has query params, otherwise use ?
+  const separator = url.includes('?') ? '&' : '?';
+  let nextPage: string | null = `${url}${separator}${urlSearchParams}`;
   let pageCount = 0;
 
   logger().debug(
@@ -284,17 +286,14 @@ export async function getOrCreateExpenseAccount(
     }
   }
 
-  logger().debug({ merchantName, dryRun }, 'Looking for expense account');
-
   try {
-    // Search for existing expense account by name
-    const searchUrl = '/api/v1/accounts?type=expense';
-    const response = await fireflyAxios.get(searchUrl);
+    // Get ALL expense accounts (using pagination to ensure we get everything)
+    const allExpenseAccounts = await paginate('/api/v1/accounts?type=expense');
 
     // Look for exact name match
-    const existingAccount = response.data.data.find(
-      (account: { attributes: { name: string } }) => account.attributes.name === merchantName,
-    );
+    const existingAccount = allExpenseAccounts.find(
+      (account: any) => account.attributes?.name === merchantName,
+    ) as { id: string; attributes: { name: string } } | undefined;
 
     if (existingAccount) {
       const accountId = existingAccount.id;
@@ -306,17 +305,16 @@ export async function getOrCreateExpenseAccount(
       return accountId;
     }
 
-    // In dry-run mode, don't create new accounts
+    // Account doesn't exist, need to create it
     if (dryRun) {
       logger().info(
         { merchantName },
         '🔍 DRY RUN - Would create new expense account',
       );
-      // Return undefined to indicate account would be created
       return undefined;
     }
 
-    // Create new expense account if not found
+    // Create new expense account
     logger().debug({ merchantName }, 'Creating new expense account');
     const createResponse = await fireflyAxios.post('/api/v1/accounts', {
       name: merchantName,
@@ -324,31 +322,59 @@ export async function getOrCreateExpenseAccount(
     });
 
     const accountId = createResponse.data.data.id;
-    logger().info(
-      {
-        merchantName,
-        accountId,
-      },
-      'Created new expense account',
-    );
+    logger().info({ merchantName, accountId }, 'Created new expense account');
 
     expenseAccountCache.set(merchantName, accountId);
     return accountId;
-  } catch (e: unknown) {
-    const error = e as {
+  } catch (error: unknown) {
+    const err = error as {
       response?: { status?: number; data?: unknown };
       message?: string;
     };
+
+    // If we got a 422, the account was likely created by a parallel process
+    // Try to fetch it one more time
+    if (err?.response?.status === 422) {
+      logger().debug(
+        { merchantName },
+        'Got 422 error, account may have been created by another process. Fetching again...',
+      );
+
+      try {
+        const allExpenseAccounts = await paginate(
+          '/api/v1/accounts?type=expense',
+        );
+        const existingAccount = allExpenseAccounts.find(
+          (account: any) => account.attributes?.name === merchantName,
+        ) as { id: string; attributes: { name: string } } | undefined;
+
+        if (existingAccount) {
+          const accountId = existingAccount.id;
+          logger().info(
+            { merchantName, accountId },
+            'Found existing expense account after 422 error',
+          );
+          expenseAccountCache.set(merchantName, accountId);
+          return accountId;
+        }
+      } catch (retryError) {
+        logger().error(
+          { merchantName, error: retryError },
+          'Failed to fetch account after 422 error',
+        );
+      }
+    }
+
     logger().error(
       {
         merchantName,
-        error: error.message,
-        status: error?.response?.status,
-        data: error?.response?.data,
+        error: err.message,
+        status: err?.response?.status,
+        data: err?.response?.data,
       },
       'Error getting or creating expense account',
     );
-    throw e;
+    return undefined;
   }
 }
 
